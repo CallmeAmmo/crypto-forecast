@@ -6,60 +6,123 @@ import joblib
 import datetime as dt
 from env_var import env
 
+# Function to calculate the average change
+def calculate_average_percentage_change(data, column):
+    percentage_changes = data[column].pct_change().dropna()
+    return percentage_changes.mean()
+
+
 # Function to predict the closing price for the next N hours
 def predict_next_hours(model, scaler, last_data, num_hours, time_step, features, start_time):
     predictions = []
     timestamps = []
     data = last_data.copy()
     current_time = start_time
+    new_rows = []  # To store all the new rows formed
+
+    # Calculate average changes for high and low adjustments
+    df_last = pd.DataFrame(data, columns=features)
+    avg_change_high = calculate_average_percentage_change(df_last, 'high')
+    avg_change_low = calculate_average_percentage_change(df_last, 'low')
+
+    avg_change_volumefrom = calculate_average_percentage_change(df_last, 'volumefrom')
+    avg_change_volumeto = calculate_average_percentage_change(df_last, 'volumeto')
 
     for _ in range(num_hours):
         scaled_data = scaler.transform(data[-time_step:])
         X_input = scaled_data.reshape(1, time_step, len(features))
         pred = model.predict(X_input)
-        pred_inversed = scaler.inverse_transform(np.concatenate((pred, np.zeros((pred.shape[0], len(features) - 1))), axis=1))[:, 0]
+        pred_inversed = scaler.inverse_transform(
+            np.concatenate((pred, np.zeros((pred.shape[0], len(features) - 1))), axis=1)
+        )[:, 0]
         predictions.append(pred_inversed[0])
         timestamps.append(current_time)
         current_time += pd.Timedelta(hours=1)
 
-        # Add the predicted value as the next 'close' and shift the window
-        new_row = np.append(data[-1, 1:], pred_inversed[0]).reshape(1, len(features))
+        # Create a new row with the predicted close value and the necessary adjustments
+        new_row = data[-1].copy()
+        new_row[0] = new_row[3]  # open price of new row = close price of previous row
+        new_row[3] = pred_inversed[0]  # close price of new row = predicted close
+
+        # Introduce random positive or negative change for high and low prices
+        high_change =  avg_change_high * new_row[1] * np.random.choice([-1, 1])
+        low_change =  avg_change_low * new_row[2] * np.random.choice([-1, 1])
+
+        # Introduce random positive or negative change for volumefrom and volumeto
+        volumefrom_change =  avg_change_volumefrom * new_row[4] * np.random.choice([-1, 1])
+        volumeto_change = avg_change_volumeto * new_row[5] * np.random.choice([-1, 1])
+
+        # features = ['open', 'high', 'low', 'close', 'volumefrom', 'volumeto']
+
+        new_row[1] = new_row[1] + high_change  # high price of new row
+        new_row[2] = new_row[2] + low_change   # low price of new row
+
+        new_row[4] = new_row[4] + volumefrom_change
+        new_row[5] = new_row[5] + volumeto_change
+
+        # Ensure that the high is greater than or equal to both the open and close
+        new_row[1] = max(new_row[1], new_row[3], new_row[0])
+        
+        # Ensure that the low is less than or equal to both the open and close
+        new_row[2] = min(new_row[2], new_row[3], new_row[0])
+
+        # Store the new row
+        new_rows.append(new_row.copy())
+
         data = np.vstack([data, new_row])
     
-    return pd.DataFrame({'time': timestamps, 'predicted_close': predictions})
+    # Use raw predictions without smoothing
+    predictions_raw = np.array(predictions)
+    
+    # Create a DataFrame for the new rows
+    new_rows_df = pd.DataFrame(new_rows, columns=features)
+    
+    return pd.DataFrame({'time': timestamps, 'predicted_close': predictions_raw}), new_rows_df
 
 # Load the saved model
-saved_model = load_model('lstm_model.h5')
+try:
+    saved_model = load_model('lstm_model.h5')
+except Exception as e:
+    print(f"Error loading model: {e}")
+    exit()
 
 # Load the saved scaler
-scaler = joblib.load('scaler.save')
+try:
+    scaler = joblib.load('scaler.save')
+except Exception as e:
+    print(f"Error loading scaler: {e}")
+    exit()
 
-def fetch_data(symbol, comparison_symbol, limit, to_date=None):
-    base_url = 'https://min-api.cryptocompare.com/data/v2/histohour'
-    if to_date is not None:
-        toTs = int(dt.datetime.strptime(to_date, '%Y-%m-%d').timestamp())
-        url = f'{base_url}?fsym={symbol}&tsym={comparison_symbol}&limit={limit}&toTs={toTs}'
-    else:
-        url = f'{base_url}?fsym={symbol}&tsym={comparison_symbol}&limit={limit}'
-    
-    response = requests.get(url)
-    data = response.json()
-    return pd.DataFrame(data['Data']['Data'])
+def fetch_data():
+    df = pd.read_csv('data.csv')
+
+    # Preprocess the data
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    df.set_index('time', inplace=True)
+
+    return df
+
 
 # Fetch data for the last 2000 hours
-df = fetch_data('BTC', 'USD', 2000, to_date=env.last_date)
-df['time'] = pd.to_datetime(df['time'], unit='s')
-df.set_index('time', inplace=True)
+try:
+    df = fetch_data()
+except Exception as e:
+    print(f"Error fetching data: {e}")
+    exit()
+
 
 # Select features
 features = ['open', 'high', 'low', 'close', 'volumefrom', 'volumeto']
 
 # Get the last 'time_step' rows from the data for prediction
-time_step = 100  # This should be the same as used during training
+time_step = env.lag  # This should be the same as used during training
 last_data = df[features].values[-time_step:]
 start_time = df.index[-1]
 
 # Predict the closing price for the next 24 hours
-predictions_df = predict_next_hours(saved_model, scaler, last_data, 24, time_step, features, start_time)
+predictions_df, new_rows_df = predict_next_hours(saved_model, scaler, last_data, 48, time_step, features, start_time)
 predictions_df.to_csv('predictions_1.csv', index=False)
+# new_rows_df.to_csv('new_rows.csv', index=False)
 print(predictions_df)
+# print(new_rows_df)
+
