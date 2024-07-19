@@ -48,15 +48,15 @@ def predict_next_hours(model, scaler, last_data, num_hours, time_step, features,
         new_row[3] = pred_inversed[0]  # close price of new row = predicted close
 
         # Introduce random positive or negative change for high and low prices
-        high_change = avg_change_high * new_row[1] * np.random.choice([-1, 0, 1])
-        low_change = avg_change_low * new_row[2] * np.random.choice([-1, 0, 1])
+        high_change = avg_change_high * new_row[1] * np.random.choice([-2, -1, 0, 1, 2])
+        low_change = avg_change_low * new_row[2] * np.random.choice([-2, -1, 0, 1, 2])
 
         # Introduce random positive or negative change for volumefrom and volumeto
         volumefrom_change = avg_change_volumefrom * new_row[4] * np.random.choice([-1, 1])
         volumeto_change = avg_change_volumeto * new_row[5] * np.random.choice([-1, 1])
 
         new_row[1] = new_row[1] + high_change  # high price of new row
-        new_row[2] = new_row[2] + low_change   # low price of new row
+        new_row[2] = new_row[2] + low_change  # low price of new row
 
         new_row[4] = new_row[4] + volumefrom_change
         new_row[5] = new_row[5] + volumeto_change
@@ -65,16 +65,18 @@ def predict_next_hours(model, scaler, last_data, num_hours, time_step, features,
         new_row[2] = min(new_row[2], new_row[3], new_row[0])
 
         data = np.vstack([data, new_row])
-    
+
     predictions_raw = np.array(predictions)
-    
+
     return pd.DataFrame({'time': timestamps, 'predicted_close': predictions_raw})
+
 
 def fetch_data():
     df = pd.read_csv('data.csv')
     df['time'] = pd.to_datetime(df['time'])
     df.set_index('time', inplace=True)
     return df
+
 
 # Load the data
 total_df = fetch_data()
@@ -93,7 +95,7 @@ predictions_df = predict_next_hours(saved_model, scaler, last_data, prediction_h
 
 print(predictions_df)
 test_hours = env.test_hours
-next_forecst = predictions_df[test_hours:].copy()
+next_forecast = predictions_df[test_hours:].copy()
 
 st_df = predictions_df[:test_hours].copy()
 st_df['actual'] = total_df[-1 * test_hours:]['close'].values
@@ -102,6 +104,7 @@ true_values = total_df['close'].values[-1 * test_hours:]
 pred_values = predictions_df['predicted_close'].values[:test_hours]
 mape = mean_absolute_percentage_error(true_values, pred_values)
 mae = mean_absolute_error(true_values, pred_values)
+accuracy = 100 - mape
 
 # Dash app
 app = dash.Dash(__name__)
@@ -111,6 +114,7 @@ app.layout = html.Div(children=[
 
     html.Div(children=f"MAPE: {mape:.2%}"),
     html.Div(children=f"MAE: {mae:.2f}"),
+    html.Div(children=f"Accuracy: {accuracy:.2f}"),
 
     dcc.Graph(
         id='price-prediction-graph',
@@ -139,10 +143,36 @@ app.layout = html.Div(children=[
         }
     ),
 
+    html.Div([
+        dcc.DatePickerRange(
+            id='date-picker-range',
+            min_date_allowed=predictions_df['time'].min().date(),
+            max_date_allowed=predictions_df['time'].max().date(),
+            start_date=predictions_df['time'].min().date(),
+            end_date=predictions_df['time'].max().date()
+        ),
+        html.Div(id='output-container-date-picker-range'),
+
+        dcc.Dropdown(
+            id='start-hour-dropdown',
+            options=[{'label': f'{i:02d}:00', 'value': i} for i in range(24)],
+            value=0,
+            clearable=False,
+            style={'width': '48%', 'display': 'inline-block'}
+        ),
+        dcc.Dropdown(
+            id='end-hour-dropdown',
+            options=[{'label': f'{i:02d}:00', 'value': i} for i in range(24)],
+            value=23,
+            clearable=False,
+            style={'width': '48%', 'display': 'inline-block'}
+        )
+    ], style={'margin-top': '20px'}),
+
     dash_table.DataTable(
         id='prediction-table',
-        columns=[{"name": i, "id": i} for i in next_forecst.columns],
-        data=next_forecst.to_dict('records'),
+        columns=[{"name": i, "id": i} for i in predictions_df.columns],
+        data=next_forecast.to_dict('records'),
         style_table={'overflowX': 'auto'},
         style_cell={'textAlign': 'left'},
         style_header={
@@ -152,8 +182,24 @@ app.layout = html.Div(children=[
     )
 ])
 
+
+@app.callback(
+    Output('prediction-table', 'data'),
+    [Input('date-picker-range', 'start_date'),
+     Input('date-picker-range', 'end_date'),
+     Input('start-hour-dropdown', 'value'),
+     Input('end-hour-dropdown', 'value')]
+)
+def update_table(start_date, end_date, start_hour, end_hour):
+    start_datetime = pd.to_datetime(start_date) + pd.Timedelta(hours=start_hour)
+    end_datetime = pd.to_datetime(end_date) + pd.Timedelta(hours=end_hour)
+    filtered_df = predictions_df[(predictions_df['time'] >= start_datetime) & (predictions_df['time'] <= end_datetime)]
+    return filtered_df.to_dict('records')
+
+
 def open_browser():
     webbrowser.open_new("http://127.0.0.1:8050/")
+
 
 if __name__ == '__main__':
     Timer(1, open_browser).start()
